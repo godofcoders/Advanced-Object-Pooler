@@ -1,20 +1,94 @@
+Here is the **fully GitHub-ready README**.
+You can **copy paste this directly into `README.md`** and it will render correctly on GitHub.
+I removed unsupported attributes and ensured **Markdown + Mermaid + tables render properly**.
+
+---
+
 # ♻️ Advanced Object Pooling System (Unity 2021+)
 
-A generic, interface-driven object pooling system for Unity. This module leverages the modern `UnityEngine.Pool` API to provide a memory-safe, zero-allocation solution for spawning high-frequency objects (bullets, particles, enemies).
+![Unity](https://img.shields.io/badge/Unity-2021%2B-black)
+![CSharp](https://img.shields.io/badge/C%23-Generic-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-## 🚀 Overview
-Standard object pooling often relies on slow `List<GameObject>` searches or non-generic singleton managers. 
+A **generic, interface-driven object pooling system** for Unity built on top of the modern `UnityEngine.Pool` API.
 
-This architecture uses a **Generic Factory (`ComponentPoolFactory<T>`)** that wraps Unity's native stack-based pool. It enforces the `IPoolable<T>` interface, allowing objects to handle their own reset logic (`OnSpawn`/`OnDespawn`) and automatically return themselves to the pool, decoupling them completely from the spawner.
+This module provides a **memory-safe, zero-allocation solution** for spawning high-frequency objects such as:
 
-## 🧠 Key Features & Patterns
+* Bullets
+* Particles
+* Enemies
+* VFX
+* Temporary gameplay objects
 
-* **Generic Constraints:** The system works with any class that inherits from `MonoBehaviour` and implements `IPoolable<T>`.
-* **Self-Managing Objects:** Objects are injected with a reference to their own pool upon creation, allowing them to `Release()` themselves when their task is done (e.g., after a timer or collision).
-* **Zero-Allocation Runtime:** Uses Unity's `ObjectPool<T>` (Stack-based) to ensure getting and releasing objects generates **0 B** of garbage.
-* **Safety Checks:** Includes optional collection checks (Editor-only) to prevent the common bug of releasing an item that is already in the pool.
+It removes the need for slow `List<GameObject>` searches or monolithic pooling managers.
 
-## 🏗️ Lifecycle Diagram
+---
+
+# 🚀 Overview
+
+Traditional Unity pooling systems often rely on:
+
+* `List<GameObject>` scanning
+* Singleton managers
+* Manual lifecycle management
+
+This architecture introduces a **Generic Factory (`ComponentPoolFactory<T>`)** that wraps Unity’s native **stack-based `ObjectPool<T>`**.
+
+Objects implement the `IPoolable<T>` interface and manage their own lifecycle using:
+
+* `OnSpawn()`
+* `OnDespawn()`
+
+Each object is injected with its pool reference, allowing it to **return itself automatically**, keeping the system **fully decoupled** from the spawner.
+
+---
+
+# 🧠 Key Features
+
+### Generic & Type Safe
+
+Works with any `MonoBehaviour` implementing:
+
+```csharp
+IPoolable<T>
+```
+
+---
+
+### Self-Managing Objects
+
+Pooled objects receive their pool reference and can **release themselves** when finished.
+
+Example triggers:
+
+* Timer
+* Collision
+* Animation completion
+
+---
+
+### Zero Allocation Runtime
+
+Uses Unity’s **stack-based `ObjectPool<T>`**, ensuring:
+
+```
+0 B GC allocations when spawning/despawning
+```
+
+Perfect for **high-frequency gameplay loops**.
+
+---
+
+### Safety Checks
+
+Optional **editor-only collection checks** prevent common bugs such as:
+
+* Releasing an object already in the pool
+* Double releasing the same object
+
+---
+
+# 🏗️ Lifecycle
 
 ```mermaid
 graph TD
@@ -47,3 +121,157 @@ graph TD
     class Client client
     class Factory,Pool system
     class Obj logic
+```
+
+---
+
+# 📂 Project Structure
+
+This project uses **Assembly Definitions (`.asmdef`)** to enforce clean architecture boundaries.
+
+```
+Assets/AdvancedPooling/
+
+Core/
+ ├── AdvancedPooling.Core.asmdef
+ └── IPoolable.cs
+
+Runtime/
+ ├── AdvancedPooling.Runtime.asmdef
+ └── ComponentPoolFactory.cs
+
+Unity/
+ ├── AdvancedPooling.Unity.asmdef
+ └── PoolDemoSpawner.cs
+```
+
+### Layer Responsibilities
+
+| Layer       | Purpose                                |
+| ----------- | -------------------------------------- |
+| **Core**    | Contains pure interfaces and contracts |
+| **Runtime** | Contains the pooling implementation    |
+| **Unity**   | Example MonoBehaviour usage            |
+
+This separation improves:
+
+* Modularity
+* Testability
+* Clean dependency flow
+
+---
+
+# 🛠️ Usage
+
+## 1️⃣ Implement `IPoolable<T>`
+
+Example `Bullet` implementation:
+
+```csharp
+using UnityEngine;
+using UnityEngine.Pool;
+using AdvancedPooling.Core;
+
+public class Bullet : MonoBehaviour, IPoolable<Bullet>
+{
+    private IObjectPool<Bullet> _pool;
+
+    // Dependency Injection from factory
+    public void Initialize(IObjectPool<Bullet> pool)
+    {
+        _pool = pool;
+    }
+
+    // Called when object is retrieved from the pool
+    public void OnSpawn()
+    {
+        Invoke(nameof(ReturnToPool), 2f);
+    }
+
+    // Called when object is returned to the pool
+    public void OnDespawn()
+    {
+        CancelInvoke();
+    }
+
+    private void ReturnToPool()
+    {
+        _pool.Release(this);
+    }
+}
+```
+
+---
+
+## 2️⃣ Create the Pool
+
+Initialize the factory inside your controller.
+
+```csharp
+using UnityEngine;
+using AdvancedPooling.Runtime;
+
+public class WeaponController : MonoBehaviour
+{
+    [SerializeField] private Bullet _prefab;
+
+    private ComponentPoolFactory<Bullet> _bulletPool;
+
+    void Start()
+    {
+        _bulletPool = new ComponentPoolFactory<Bullet>(
+            prefab: _prefab,
+            defaultCapacity: 20,
+            maxSize: 100
+        );
+    }
+
+    void Fire()
+    {
+        Bullet bullet = _bulletPool.Get();
+
+        bullet.transform.position = transform.position;
+        bullet.transform.rotation = transform.rotation;
+    }
+}
+```
+
+---
+
+# ⚙️ Architecture Principles
+
+This system follows several **software engineering best practices**:
+
+| Principle               | Implementation                                  |
+| ----------------------- | ----------------------------------------------- |
+| Dependency Injection    | Pool reference injected into objects            |
+| Open/Closed Principle   | Any component type can be pooled                |
+| Single Responsibility   | Factory manages pool, objects manage themselves |
+| Zero Allocation Runtime | Uses Unity's `ObjectPool<T>`                    |
+
+---
+
+# 🎯 Ideal Use Cases
+
+This system is ideal for:
+
+* Bullet hell games
+* Particle-heavy VFX
+* RTS unit spawning
+* Mobile performance optimization
+* High-frequency gameplay objects
+
+---
+
+# 📌 Requirements
+
+* **Unity 2021+**
+* `UnityEngine.Pool` namespace
+
+---
+
+# 📄 License
+
+MIT License.
+
+---
