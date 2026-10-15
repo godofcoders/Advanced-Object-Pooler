@@ -1,0 +1,6 @@
+{
+    "name": "AdvancedPooling.Tests.PlayMode",
+    "references": ["AdvancedPooling.Core", "AdvancedPooling.Runtime", "AdvancedPooling.Unity"],
+    "optionalUnityReferences": ["TestAssemblies"],
+    "autoReferenced": false
+}

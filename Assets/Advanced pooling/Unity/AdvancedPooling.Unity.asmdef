@@ -3,7 +3,8 @@
     "rootNamespace": "",
     "references": [
         "GUID:25b7ea50f29b7467484f367c5d23530f",
-        "GUID:85dee6b28c00b45e1a289a79b42e727e"
+        "GUID:85dee6b28c00b45e1a289a79b42e727e",
+        "Unity.InputSystem"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

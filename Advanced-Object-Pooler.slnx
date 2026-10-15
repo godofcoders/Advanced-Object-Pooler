@@ -2,6 +2,7 @@
   <Project Path="Assembly-CSharp-Editor.csproj" />
   <Project Path="AdvancedPooling.Unity.csproj" />
   <Project Path="AdvancedPooling.Runtime.csproj" />
+  <Project Path="AdvancedPooling.Tests.PlayMode.csproj" />
   <Project Path="Assembly-CSharp.csproj" />
   <Project Path="AdvancedPooling.Core.csproj" />
 </Solution>

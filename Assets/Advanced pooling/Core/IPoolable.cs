@@ -2,16 +2,16 @@ using UnityEngine.Pool;
 
 namespace AdvancedPooling.Core
 {
-    // T is constrained to a class so it can be used with Unity's IObjectPool
+    /// <summary>Lifecycle contract for components managed by a pool on Unity's main thread.</summary>
     public interface IPoolable<T> where T : class
     {
-        // Gives the object a reference to its pool so it can release itself
+        /// <summary>Called once per instance while inactive. Do not rely on Awake having run yet.</summary>
         void Initialize(IObjectPool<T> pool);
-        
-        // Called the moment it leaves the pool
+
+        /// <summary>Called after activation and placement. Reset per-use state here.</summary>
         void OnSpawn();
-        
-        // Called the moment it returns to the pool
+
+        /// <summary>Called before deactivation. Cancel timers and subscriptions here.</summary>
         void OnDespawn();
     }
 }

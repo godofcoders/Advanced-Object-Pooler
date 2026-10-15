@@ -1,277 +1,173 @@
-Here is the **fully GitHub-ready README**.
-You can **copy paste this directly into `README.md`** and it will render correctly on GitHub.
-I removed unsupported attributes and ensured **Markdown + Mermaid + tables render properly**.
+# Advanced Object Pooling for Unity
 
----
+A generic component pool built on `UnityEngine.Pool.ObjectPool<T>`, with explicit ownership, lifecycle callbacks, prewarming, bounded inactive storage, optional active limits, and deterministic pool cleanup.
 
-# ♻️ Advanced Object Pooling System (Unity 2021+)
+Use it for projectiles, VFX, enemies, and other frequently reused `MonoBehaviour` components. All pool operations must run on Unity's main thread.
 
-![Unity](https://img.shields.io/badge/Unity-2021%2B-black)
-![CSharp](https://img.shields.io/badge/C%23-Generic-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+## Features
 
-A **generic, interface-driven object pooling system** for Unity built on top of the modern `UnityEngine.Pool` API.
+- **Type-safe contracts:** `ComponentPoolFactory<T>` accepts components implementing `IPoolable<T>`.
+- **Self-return:** each instance receives the factory as its `IObjectPool<T>`, so self-release uses the same checks as external release.
+- **Safe lifecycle:** initialize while inactive; set the world pose before activation and `OnSpawn`; run `OnDespawn` before deactivation.
+- **Ownership checks in every build:** null, foreign, and duplicate returns are rejected. Hash sets provide expected O(1) membership checks without scanning inactive objects.
+- **Prewarming:** create distinct inactive instances before gameplay, without running spawn/despawn callbacks.
+- **Capacity control:** `maxSize` bounds retained inactive instances; optional `maxActive` bounds simultaneous rentals. `TryGet` reports saturation without throwing.
+- **Usage counts:** inspect `CountAll`, `CountActive`, and `CountInactive`.
+- **Cleanup:** `Clear` destroys inactive instances; `Dispose` also despawns and destroys outstanding instances and rejects further use.
+- **Failure recovery:** instances whose spawn/despawn callbacks throw are discarded, and pool operation guards are reset. Disposal continues cleaning up if a despawn callback throws.
 
-This module provides a **memory-safe, zero-allocation solution** for spawning high-frequency objects such as:
+## Requirements and installation
 
-* Bullets
-* Particles
-* Enemies
-* VFX
-* Temporary gameplay objects
+The included project targets **Unity 6.0 (6000.0.66f2)**. Open it with that editor version to run the demo and tests. The pooling API requires `UnityEngine.Pool` (introduced in Unity 2021), but older editor versions have not been validated for this project and its packages.
 
-It removes the need for slow `List<GameObject>` searches or monolithic pooling managers.
+To use the pool in another compatible Unity project, copy `Assets/Advanced pooling/Core` and `Assets/Advanced pooling/Runtime`, preserving their `.meta` files. Add references to `AdvancedPooling.Core` and `AdvancedPooling.Runtime` if your scripts use assembly definitions. The pool has no third-party runtime dependencies.
 
----
+The optional `Unity` demo assembly also references the **Input System** package. The included project already installs it. The demo supports the new Input System and legacy input; when both are enabled it reads the new Input System.
 
-# 🚀 Overview
-
-Traditional Unity pooling systems often rely on:
-
-* `List<GameObject>` scanning
-* Singleton managers
-* Manual lifecycle management
-
-This architecture introduces a **Generic Factory (`ComponentPoolFactory<T>`)** that wraps Unity’s native **stack-based `ObjectPool<T>`**.
-
-Objects implement the `IPoolable<T>` interface and manage their own lifecycle using:
-
-* `OnSpawn()`
-* `OnDespawn()`
-
-Each object is injected with its pool reference, allowing it to **return itself automatically**, keeping the system **fully decoupled** from the spawner.
-
----
-
-# 🧠 Key Features
-
-### Generic & Type Safe
-
-Works with any `MonoBehaviour` implementing:
+## Implement a pooled component
 
 ```csharp
-IPoolable<T>
-```
-
----
-
-### Self-Managing Objects
-
-Pooled objects receive their pool reference and can **release themselves** when finished.
-
-Example triggers:
-
-* Timer
-* Collision
-* Animation completion
-
----
-
-### Zero Allocation Runtime
-
-Uses Unity’s **stack-based `ObjectPool<T>`**, ensuring:
-
-```
-0 B GC allocations when spawning/despawning
-```
-
-Perfect for **high-frequency gameplay loops**.
-
----
-
-### Safety Checks
-
-Optional **editor-only collection checks** prevent common bugs such as:
-
-* Releasing an object already in the pool
-* Double releasing the same object
-
----
-
-# 🏗️ Lifecycle
-
-```mermaid
-graph TD
-    %% Nodes
-    Client["Client Script<br>(PoolDemoSpawner)"]
-    Factory["Pool Factory<br>(Wraps Unity ObjectPool)"]
-    Pool["Internal Stack<br>(Inactive Objects)"]
-    Obj["Pooled Object<br>(Implements IPoolable)"]
-
-    %% Flow - Spawning
-    Client -->|"1. Calls Get()"| Factory
-    Factory -->|"2. Checks Stack"| Pool
-    Pool -.->|"3a. Pop Existing"| Obj
-    Factory -.->|"3b. Instantiate New (if empty)"| Obj
-    
-    Factory -->|"4. Calls OnSpawn()"| Obj
-    Obj -->|"5. Active in Scene"| Obj
-
-    %% Flow - Despawning
-    Obj -->|"6. Logic Complete<br>(Time/Collision)"| Obj
-    Obj -->|"7. Calls Release(this)"| Factory
-    Factory -->|"8. Calls OnDespawn()"| Obj
-    Factory -->|"9. Push to Stack"| Pool
-
-    %% Styling
-    classDef client fill:#4b5363,stroke:#fff,stroke-width:2px,color:#fff
-    classDef system fill:#2374ab,stroke:#fff,stroke-width:2px,color:#fff
-    classDef logic fill:#4caf50,stroke:#fff,stroke-width:2px,color:#fff
-
-    class Client client
-    class Factory,Pool system
-    class Obj logic
-```
-
----
-
-# 📂 Project Structure
-
-This project uses **Assembly Definitions (`.asmdef`)** to enforce clean architecture boundaries.
-
-```
-Assets/AdvancedPooling/
-
-Core/
- ├── AdvancedPooling.Core.asmdef
- └── IPoolable.cs
-
-Runtime/
- ├── AdvancedPooling.Runtime.asmdef
- └── ComponentPoolFactory.cs
-
-Unity/
- ├── AdvancedPooling.Unity.asmdef
- └── PoolDemoSpawner.cs
-```
-
-### Layer Responsibilities
-
-| Layer       | Purpose                                |
-| ----------- | -------------------------------------- |
-| **Core**    | Contains pure interfaces and contracts |
-| **Runtime** | Contains the pooling implementation    |
-| **Unity**   | Example MonoBehaviour usage            |
-
-This separation improves:
-
-* Modularity
-* Testability
-* Clean dependency flow
-
----
-
-# 🛠️ Usage
-
-## 1️⃣ Implement `IPoolable<T>`
-
-Example `Bullet` implementation:
-
-```csharp
+using AdvancedPooling.Core;
 using UnityEngine;
 using UnityEngine.Pool;
-using AdvancedPooling.Core;
 
-public class Bullet : MonoBehaviour, IPoolable<Bullet>
+public sealed class Bullet : MonoBehaviour, IPoolable<Bullet>
 {
     private IObjectPool<Bullet> _pool;
+    private float _expiresAt;
+    private bool _spawned;
 
-    // Dependency Injection from factory
     public void Initialize(IObjectPool<Bullet> pool)
     {
         _pool = pool;
+        // Cache components here: Awake may not have run on an inactive clone.
     }
 
-    // Called when object is retrieved from the pool
     public void OnSpawn()
     {
-        Invoke(nameof(ReturnToPool), 2f);
+        _spawned = true;
+        _expiresAt = Time.time + 2f;
+        // transform.position/rotation already contain the requested spawn pose.
     }
 
-    // Called when object is returned to the pool
     public void OnDespawn()
     {
-        CancelInvoke();
+        _spawned = false;
+        // Reset physics and cancel subscriptions, timers, or coroutines you own.
     }
 
-    private void ReturnToPool()
+    private void Update()
     {
-        _pool.Release(this);
+        if (_spawned && Time.time >= _expiresAt)
+        {
+            _spawned = false;
+            _pool.Release(this);
+        }
     }
 }
 ```
 
----
+`Initialize` runs once per created instance. `OnSpawn` and `OnDespawn` run once per successful rental and return, respectively. Prewarming invokes only `Initialize`. An active instance also receives `OnDespawn` during pool disposal, or as cleanup if `OnSpawn` throws.
 
-## 2️⃣ Create the Pool
-
-Initialize the factory inside your controller.
+## Create, warm, spawn, and dispose
 
 ```csharp
-using UnityEngine;
 using AdvancedPooling.Runtime;
+using UnityEngine;
 
-public class WeaponController : MonoBehaviour
+public sealed class WeaponController : MonoBehaviour
 {
     [SerializeField] private Bullet _prefab;
+    private ComponentPoolFactory<Bullet> _bullets;
 
-    private ComponentPoolFactory<Bullet> _bulletPool;
-
-    void Start()
+    private void Awake()
     {
-        _bulletPool = new ComponentPoolFactory<Bullet>(
+        _bullets = new ComponentPoolFactory<Bullet>(
             prefab: _prefab,
-            defaultCapacity: 20,
-            maxSize: 100
-        );
+            defaultCapacity: 100,
+            maxSize: 100,
+            parentContainer: transform,
+            maxActive: 100);
+        _bullets.Prewarm(100);
     }
 
-    void Fire()
+    public void Fire()
     {
-        Bullet bullet = _bulletPool.Get();
+        // False means all 100 active slots are occupied; skip this shot.
+        if (_bullets.TryGet(transform.position, transform.rotation, out Bullet bullet))
+        {
+            // Further gameplay configuration can go here. OnSpawn has already run.
+        }
+    }
 
-        bullet.transform.position = transform.position;
-        bullet.transform.rotation = transform.rotation;
+    private void OnDestroy()
+    {
+        _bullets?.Dispose();
     }
 }
 ```
 
----
+Use `Get(position, rotation)` or its `TryGet` overload when spawn logic depends on pose. Parameterless `Get()` uses the instance's current transform after reparenting; it does not reset pose or scale. Custom data required by `OnSpawn` needs to be supplied by your component's own design.
 
-# ⚙️ Architecture Principles
+## API and limits
 
-This system follows several **software engineering best practices**:
+| API / option | Behavior |
+| --- | --- |
+| `defaultCapacity` | Initial collection capacity; does **not** instantiate prefabs or cap active objects. Default: 20. |
+| `maxSize` | Maximum retained inactive objects. Returned overflow objects are despawned and destroyed. Default: 100. |
+| `maxActive` | Maximum simultaneous active rentals; 0 means unlimited. Default: 0. |
+| `Prewarm(count)` | Ensure at least this many inactive instances, up to `maxSize`. Setup operation that may allocate. |
+| `Get()` / `Get(position, rotation)` | Rent and activate an instance. Throws if the active limit is reached. |
+| `TryGet(out item)` / `TryGet(position, rotation, out item)` | Return false with a null item at the active limit. Invalid/disposed use and callback exceptions still throw. |
+| `Release(item)` | Despawn, deactivate, and retain or destroy an owned outstanding instance. |
+| `Get(out item)` | Return a Unity `PooledObject<T>` scope. Dispose the scope once, and do not also self-release that rental. |
+| `CountAll` / `CountActive` / `CountInactive` | Currently tracked owned, outstanding, and available instances. |
+| `Clear()` | Destroy inactive instances; outstanding instances remain valid and can be returned. |
+| `Dispose()` | Despawn active instances and destroy all owned objects and internal storage. Repeated calls are harmless. |
 
-| Principle               | Implementation                                  |
-| ----------------------- | ----------------------------------------------- |
-| Dependency Injection    | Pool reference injected into objects            |
-| Open/Closed Principle   | Any component type can be pooled                |
-| Single Responsibility   | Factory manages pool, objects manage themselves |
-| Zero Allocation Runtime | Uses Unity's `ObjectPool<T>`                    |
+Inactive instances live under an inactive storage child of `parentContainer`; rentals are reparented to `parentContainer` before activation. With no parent they become scene-root objects. Keep the parent active during use, and dispose the factory before destroying its container or unloading its scene. The factory does not keep objects alive across scene changes automatically.
 
----
+## Allocation behavior
 
-# 🎯 Ideal Use Cases
+The **warmed factory Get/Release path is designed to allocate 0 managed bytes**, provided the pool has enough instances and collection capacity for the workload and the component's callbacks do not allocate. This is covered by a Play Mode allocation regression test.
 
-This system is ideal for:
+Construction, prewarming, instantiation when empty, collection growth, exceptions, and user callbacks can allocate. `defaultCapacity` reserves collection space; `Prewarm` creates instances. For a bounded workload, set `defaultCapacity`, `maxSize`, `maxActive`, and the prewarm target to the expected peak. Profile the actual player build and your callbacks on your target device before making performance guarantees.
 
-* Bullet hell games
-* Particle-heavy VFX
-* RTS unit spawning
-* Mobile performance optimization
-* High-frequency gameplay objects
+## Lifecycle rules
 
----
+- Return objects through their owning pool. Never release an object twice or use it after returning it.
+- `OnSpawn`, `OnDespawn`, `Initialize`, `OnEnable`, and `OnDisable` must not call back into the same pool synchronously. The operation guard rejects reentrancy. Defer such work until after the callback returns.
+- Do not return from `OnDisable`; the pool deactivates objects as part of return and teardown.
+- Reset per-rental state in callbacks. The factory does not reset your health, physics, materials, subscriptions, coroutines, or transform scale.
+- Prefer `Release` over external `Destroy`. A destroyed inactive component is discarded on retrieval; returning a destroyed active component removes its tracking entry. Counts can include externally destroyed objects until the pool encounters them. An externally destroyed active object that is never returned still occupies its active slot until disposal.
+- Cancel delayed work on despawn. A raw component reference does not identify a rental generation; an old asynchronous callback could otherwise release a later rental of the same object.
+- Unity's `Destroy` is deferred in Play Mode: objects are deactivated immediately and removed from pool ownership, then destroyed at frame end.
 
-# 📌 Requirements
+## Demo
 
-* **Unity 2021+**
-* `UnityEngine.Pool` namespace
+Open `Assets/Advanced pooling/Demo/Scenes/SpawnerDemo.unity`, enter Play Mode, and hold the left mouse button. The spawner prewarms projectiles, places them before setting their velocity, skips shots at the active limit, and disposes its pool on destruction. `EnergyProjectile` uses 3D `Rigidbody` physics and returns on either a 3D collision/trigger or its lifetime deadline. Spawned projectiles must not begin overlapping other colliders if you want them to fly before returning.
 
----
+## Tests
 
-# 📄 License
+In Unity, open **Window > General > Test Runner**, select **PlayMode**, and run `AdvancedPooling.Tests.PlayMode`. Tests cover lifecycle ordering, active/inactive source prefabs, prewarming, ownership, duplicate returns, active and retention limits, scoped rentals, clearing, disposal, callback failures, external destruction, 3D collisions and triggers, projectile expiry, spawner/container teardown, and warmed managed allocations.
 
-MIT License.
+For a command-line run, replace the editor and project paths for your machine:
 
----
+```sh
+/path/to/Unity -batchmode -nographics \
+  -projectPath /path/to/Advanced-Object-Pooler \
+  -runTests -testPlatform PlayMode \
+  -testResults /tmp/advanced-pooling-tests.xml \
+  -logFile /tmp/advanced-pooling-unity.log
+```
+
+## Project structure
+
+```text
+Assets/Advanced pooling/
+  Core/       IPoolable<T> contract (references UnityEngine.Pool)
+  Runtime/    ComponentPoolFactory<T>
+  Unity/      PoolDemoSpawner and EnergyProjectile examples
+  Demo/       Projectile prefab and sample scene
+  Tests/      Play Mode lifecycle and performance regression tests
+```
