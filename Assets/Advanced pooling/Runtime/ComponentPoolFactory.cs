@@ -18,6 +18,7 @@ namespace AdvancedPooling.Runtime
         private readonly HashSet<T> _active;
         private readonly int _maxSize;
         private readonly int _maxActive;
+        private readonly bool _allowGrowth;
         private readonly Transform _storage;
         private bool _busy;
         private bool _disposed;
@@ -26,12 +27,14 @@ namespace AdvancedPooling.Runtime
         public int CountActive => _active.Count;
         public int CountInactive => CountAll - CountActive;
         public bool IsDisposed => _disposed;
+        public bool AllowGrowth => _allowGrowth;
 
         /// <param name="defaultCapacity">Initial collection capacity; does not instantiate objects.</param>
         /// <param name="maxSize">Maximum retained inactive objects, not a limit on simultaneous spawns.</param>
         /// <param name="maxActive">Maximum simultaneous spawns; zero means unlimited.</param>
+        /// <param name="allowGrowth">Whether rentals can instantiate when no inactive instance remains.</param>
         public ComponentPoolFactory(T prefab, int defaultCapacity = 20, int maxSize = 100,
-            Transform parentContainer = null, int maxActive = 0)
+            Transform parentContainer = null, int maxActive = 0, bool allowGrowth = true)
         {
             if (prefab == null) throw new ArgumentNullException(nameof(prefab));
             if (defaultCapacity < 0) throw new ArgumentOutOfRangeException(nameof(defaultCapacity));
@@ -42,16 +45,37 @@ namespace AdvancedPooling.Runtime
             _parentContainer = parentContainer;
             _maxSize = maxSize;
             _maxActive = maxActive;
+            _allowGrowth = allowGrowth;
             _owned = new HashSet<T>(defaultCapacity);
             _active = new HashSet<T>(defaultCapacity);
             // Ownership/lease checks below run in all builds, without Unity's linear collection scan.
+            // Unity exposes no later reserve API; reserve retained storage now so returns cannot
+            // grow its backing collection, including after prewarming while other items are rented.
             _pool = new ObjectPool<T>(CreateItem, actionOnDestroy: DestroyItem,
-                collectionCheck: false, defaultCapacity: defaultCapacity, maxSize: maxSize);
+                collectionCheck: false, defaultCapacity: Math.Max(defaultCapacity, maxSize), maxSize: maxSize);
 
             var storage = new GameObject($"{prefab.name} Pool (Inactive)");
             storage.SetActive(false);
             _storage = storage.transform;
             _storage.SetParent(parentContainer, false);
+        }
+
+        /// <summary>Creates and prewarms a bounded pool. Rental never instantiates replacement objects.</summary>
+        public static ComponentPoolFactory<T> CreateFixed(T prefab, int capacity, Transform parentContainer = null)
+        {
+            if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
+            var pool = new ComponentPoolFactory<T>(prefab, capacity, capacity, parentContainer,
+                maxActive: capacity, allowGrowth: false);
+            try
+            {
+                pool.Prewarm(capacity);
+                return pool;
+            }
+            catch
+            {
+                pool.Dispose();
+                throw;
+            }
         }
 
         public T Get() => GetInternal(false, default, default);
@@ -65,38 +89,34 @@ namespace AdvancedPooling.Runtime
             return new PooledObject<T>(item, this);
         }
 
-        /// <summary>Returns false only when the configured active limit has been reached.</summary>
-        public bool TryGet(out T item)
-        {
-            CheckAvailable();
-            item = null;
-            if (AtActiveLimit) return false;
-            item = Get();
-            return true;
-        }
+        /// <summary>Returns false at the active limit or when a non-growing pool has no available instance.</summary>
+        public bool TryGet(out T item) => TryGetInternal(false, default, default, out item);
 
-        public bool TryGet(Vector3 position, Quaternion rotation, out T item)
-        {
-            CheckAvailable();
-            item = null;
-            if (AtActiveLimit) return false;
-            item = Get(position, rotation);
-            return true;
-        }
+        public bool TryGet(Vector3 position, Quaternion rotation, out T item) =>
+            TryGetInternal(true, position, rotation, out item);
 
         private bool AtActiveLimit => _maxActive > 0 && CountActive >= _maxActive;
 
         private T GetInternal(bool setPose, Vector3 position, Quaternion rotation)
         {
+            if (TryGetInternal(setPose, position, rotation, out T item)) return item;
+            throw new InvalidOperationException("The pool is exhausted or its active limit has been reached. Use TryGet for allocation-free rejection.");
+        }
+
+        private bool TryGetInternal(bool setPose, Vector3 position, Quaternion rotation, out T result)
+        {
             CheckAvailable();
-            if (AtActiveLimit) throw new InvalidOperationException("The pool's active limit has been reached.");
+            result = null;
+            if (AtActiveLimit) return false;
             _busy = true;
             try
             {
                 T item;
-                // Discard externally destroyed inactive objects rather than return a missing component.
+                // Check on every iteration: an externally destroyed instance must not trigger growth
+                // in a fixed pool, including when the destroyed item was its last inactive instance.
                 do
                 {
+                    if (!_allowGrowth && _pool.CountInactive == 0) return false;
                     item = _pool.Get();
                     if (item == null) _owned.Remove(item);
                 } while (item == null);
@@ -108,7 +128,8 @@ namespace AdvancedPooling.Runtime
                     if (setPose) item.transform.SetPositionAndRotation(position, rotation);
                     item.gameObject.SetActive(true);
                     item.OnSpawn();
-                    return item;
+                    result = item;
+                    return true;
                 }
                 catch
                 {
@@ -128,7 +149,20 @@ namespace AdvancedPooling.Runtime
             if (ReferenceEquals(item, null)) throw new ArgumentNullException(nameof(item));
             if (!_owned.Contains(item)) throw new ArgumentException("This object belongs to another pool.", nameof(item));
             if (!_active.Remove(item)) throw new InvalidOperationException("This object has already been returned.");
+            ReleaseInternal(item);
+        }
 
+        /// <summary>Rejects null, foreign, and already returned objects without allocating an exception.</summary>
+        public bool TryRelease(T item)
+        {
+            CheckAvailable();
+            if (ReferenceEquals(item, null) || !_owned.Contains(item) || !_active.Remove(item)) return false;
+            ReleaseInternal(item);
+            return true;
+        }
+
+        private void ReleaseInternal(T item)
+        {
             _busy = true;
             try
             {
@@ -160,6 +194,10 @@ namespace AdvancedPooling.Runtime
         {
             CheckAvailable();
             if (count < 0 || count > _maxSize) throw new ArgumentOutOfRangeException(nameof(count));
+            // Reserve for a complete concurrent burst, not just the inactive storage. Without this,
+            // prewarming prefabs still leaves the first burst growing the active tracking set.
+            _active.EnsureCapacity(checked(CountActive + count));
+            _owned.EnsureCapacity(checked(CountActive + Math.Max(count, CountInactive)));
             if (CountInactive >= count) return;
             _busy = true;
             var items = new T[count];

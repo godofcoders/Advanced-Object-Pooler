@@ -13,11 +13,9 @@ namespace AdvancedPooling.Unity
         [SerializeField] private EnergyProjectile _prefabToSpawn;
         [SerializeField] private Transform _containerTransform;
 
-        [Header("Performance Settings")]
-        [SerializeField, Min(0)] private int _defaultCapacity = 20;
+        [Header("Pool Capacity")]
+        [Tooltip("Created before gameplay. Shots are skipped when all projectiles are active.")]
         [SerializeField, Min(1)] private int _maxCapacity = 100;
-        [SerializeField, Min(1)] private int _maxActive = 100;
-        [SerializeField, Min(0)] private int _prewarmCount = 20;
 
         private ComponentPoolFactory<EnergyProjectile> _poolFactory;
         private bool _ownsContainer;
@@ -35,10 +33,8 @@ namespace AdvancedPooling.Unity
                 _containerTransform = new GameObject($"Pool_{_prefabToSpawn.name}").transform;
                 _ownsContainer = true;
             }
-            _poolFactory = new ComponentPoolFactory<EnergyProjectile>(_prefabToSpawn,
-                Mathf.Max(0, _defaultCapacity), Mathf.Max(1, _maxCapacity), _containerTransform,
-                Mathf.Max(1, _maxActive));
-            _poolFactory.Prewarm(Mathf.Clamp(_prewarmCount, 0, Mathf.Max(1, _maxCapacity)));
+            _poolFactory = ComponentPoolFactory<EnergyProjectile>.CreateFixed(
+                _prefabToSpawn, Mathf.Max(1, _maxCapacity), _containerTransform);
         }
 
         private void Update()

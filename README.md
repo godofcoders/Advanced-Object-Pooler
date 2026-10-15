@@ -1,6 +1,6 @@
 # Advanced Object Pooling for Unity
 
-A generic component pool built on `UnityEngine.Pool.ObjectPool<T>`, with explicit ownership, lifecycle callbacks, prewarming, bounded inactive storage, optional active limits, and deterministic pool cleanup.
+A generic component pool built on `UnityEngine.Pool.ObjectPool<T>`, with explicit ownership, lifecycle callbacks, prewarming, bounded inactive storage, optional active limits, a fixed-capacity mode, and deterministic pool cleanup.
 
 Use it for projectiles, VFX, enemies, and other frequently reused `MonoBehaviour` components. All pool operations must run on Unity's main thread.
 
@@ -10,8 +10,9 @@ Use it for projectiles, VFX, enemies, and other frequently reused `MonoBehaviour
 - **Self-return:** each instance receives the factory as its `IObjectPool<T>`, so self-release uses the same checks as external release.
 - **Safe lifecycle:** initialize while inactive; set the world pose before activation and `OnSpawn`; run `OnDespawn` before deactivation.
 - **Ownership checks in every build:** null, foreign, and duplicate returns are rejected. Hash sets provide expected O(1) membership checks without scanning inactive objects.
-- **Prewarming:** create distinct inactive instances before gameplay, without running spawn/despawn callbacks.
+- **Prewarming:** create distinct inactive instances and reserve tracking capacity for a full concurrent burst before gameplay, without running spawn/despawn callbacks.
 - **Capacity control:** `maxSize` bounds retained inactive instances; optional `maxActive` bounds simultaneous rentals. `TryGet` reports saturation without throwing.
+- **Fixed-capacity mode:** `CreateFixed` prewarms a bounded pool whose retrieval path never instantiates replacements. Use `TryGet` to reject exhaustion without allocating an exception.
 - **Usage counts:** inspect `CountAll`, `CountActive`, and `CountInactive`.
 - **Cleanup:** `Clear` destroys inactive instances; `Dispose` also despawns and destroys outstanding instances and rejects further use.
 - **Failure recovery:** instances whose spawn/despawn callbacks throw are discarded, and pool operation guards are reset. Disposal continues cleaning up if a despawn callback throws.
@@ -82,13 +83,11 @@ public sealed class WeaponController : MonoBehaviour
 
     private void Awake()
     {
-        _bullets = new ComponentPoolFactory<Bullet>(
+        // Setup allocates and creates all 100 bullets. Retrieval never grows this pool.
+        _bullets = ComponentPoolFactory<Bullet>.CreateFixed(
             prefab: _prefab,
-            defaultCapacity: 100,
-            maxSize: 100,
-            parentContainer: transform,
-            maxActive: 100);
-        _bullets.Prewarm(100);
+            capacity: 100,
+            parentContainer: transform);
     }
 
     public void Fire()
@@ -113,13 +112,16 @@ Use `Get(position, rotation)` or its `TryGet` overload when spawn logic depends 
 
 | API / option | Behavior |
 | --- | --- |
-| `defaultCapacity` | Initial collection capacity; does **not** instantiate prefabs or cap active objects. Default: 20. |
+| `defaultCapacity` | Initial ownership/active tracking capacity; does **not** instantiate prefabs or cap active objects. Default: 20. Inactive storage separately reserves at least `maxSize` slots at construction. |
 | `maxSize` | Maximum retained inactive objects. Returned overflow objects are despawned and destroyed. Default: 100. |
 | `maxActive` | Maximum simultaneous active rentals; 0 means unlimited. Default: 0. |
-| `Prewarm(count)` | Ensure at least this many inactive instances, up to `maxSize`. Setup operation that may allocate. |
-| `Get()` / `Get(position, rotation)` | Rent and activate an instance. Throws if the active limit is reached. |
-| `TryGet(out item)` / `TryGet(position, rotation, out item)` | Return false with a null item at the active limit. Invalid/disposed use and callback exceptions still throw. |
+| `allowGrowth` | Allow retrieval to instantiate when no inactive instance remains. Default: true. False requires explicit prewarming. |
+| `CreateFixed(prefab, capacity, parentContainer)` | Construct and prewarm a pool with retention and active limits equal to capacity, and growth disabled. Capacity must be positive. |
+| `Prewarm(count)` | Ensure at least this many inactive instances, up to `maxSize`, and reserve tracking for the current active count plus this target. Setup operation that may allocate. |
+| `Get()` / `Get(position, rotation)` | Rent and activate an instance. Throws at the active limit or when a non-growing pool is exhausted. |
+| `TryGet(out item)` / `TryGet(position, rotation, out item)` | Return false with a null item at the active limit or when a non-growing pool is exhausted. Invalid/disposed use and callback exceptions still throw. |
 | `Release(item)` | Despawn, deactivate, and retain or destroy an owned outstanding instance. |
+| `TryRelease(item)` | Return false for null, foreign, or duplicate returns without allocating an exception. A valid return runs the normal lifecycle; invalid/disposed pool use and callback exceptions still throw. |
 | `Get(out item)` | Return a Unity `PooledObject<T>` scope. Dispose the scope once, and do not also self-release that rental. |
 | `CountAll` / `CountActive` / `CountInactive` | Currently tracked owned, outstanding, and available instances. |
 | `Clear()` | Destroy inactive instances; outstanding instances remain valid and can be returned. |
@@ -129,9 +131,26 @@ Inactive instances live under an inactive storage child of `parentContainer`; re
 
 ## Allocation behavior
 
-The **warmed factory Get/Release path is designed to allocate 0 managed bytes**, provided the pool has enough instances and collection capacity for the workload and the component's callbacks do not allocate. This is covered by a Play Mode allocation regression test.
+Use **`CreateFixed` + `TryGet`** when gameplay must not grow the pool. Setup instantiates all objects and reserves collection capacity. Successful factory rentals and returns, exhaustion checks, and `TryRelease` rejection paths are covered by managed-allocation regression tests. The tests include full-capacity bursts, the first burst after prewarming with zero initial tracking capacity, and prewarming while other objects are outstanding.
 
-Construction, prewarming, instantiation when empty, collection growth, exceptions, and user callbacks can allocate. `defaultCapacity` reserves collection space; `Prewarm` creates instances. For a bounded workload, set `defaultCapacity`, `maxSize`, `maxActive`, and the prewarm target to the expected peak. Profile the actual player build and your callbacks on your target device before making performance guarantees.
+```csharp
+// During loading: allocations and instantiation are expected here.
+var pool = ComponentPoolFactory<Bullet>.CreateFixed(prefab, capacity: 256);
+
+// During gameplay: exhaustion returns false; no fallback Instantiate or exception.
+if (pool.TryGet(position, rotation, out Bullet bullet))
+{
+    // The bullet returns itself when done, or the caller uses pool.Release(bullet).
+}
+```
+
+Fixed mode never silently replaces externally destroyed objects or instances discarded after callback failure. Its available capacity shrinks until you explicitly call `Prewarm` during a suitable setup/loading phase. `Clear` empties its inactive storage; retrieval cannot repopulate it automatically.
+
+The default constructor keeps **growth enabled** for compatibility. `Prewarm` reserves tracking for the requested burst, and inactive storage reserves at least `maxSize` slots at construction so returns cannot resize it. Unplanned growth beyond the prepared workload can still instantiate objects and grow ownership/active tracking collections.
+
+The guarantee concerns **managed allocations in the tested factory paths**, not all Unity/native memory or arbitrary component behavior. Construction, prewarming, explicit repair, growing-pool instantiation, exceptions, and user callbacks can allocate. Inactive prewarming calls `Initialize`; it does not execute `Awake`, `OnEnable`, or `OnSpawn`, so those methods may have first-use allocations of their own. `Get` still allocates an exception on exhaustion: use `TryGet` for expected saturation. Keep scoped rentals as their `PooledObject<T>` value type rather than boxing them as `IDisposable`.
+
+Profile the actual player build, Unity lifecycle methods, and gameplay callbacks on the target device before making whole-game allocation guarantees. No IL2CPP/device allocation results are claimed by the editor tests.
 
 ## Lifecycle rules
 
@@ -145,11 +164,11 @@ Construction, prewarming, instantiation when empty, collection growth, exception
 
 ## Demo
 
-Open `Assets/Advanced pooling/Demo/Scenes/SpawnerDemo.unity`, enter Play Mode, and hold the left mouse button. The spawner prewarms projectiles, places them before setting their velocity, skips shots at the active limit, and disposes its pool on destruction. `EnergyProjectile` uses 3D `Rigidbody` physics and returns on either a 3D collision/trigger or its lifetime deadline. Spawned projectiles must not begin overlapping other colliders if you want them to fly before returning.
+Open `Assets/Advanced pooling/Demo/Scenes/SpawnerDemo.unity`, enter Play Mode, and hold the left mouse button. The spawner creates a fixed pool of projectiles in Awake, places them before setting their velocity, skips shots at capacity, and disposes its pool on destruction. `EnergyProjectile` uses 3D `Rigidbody` physics and returns on either a 3D collision/trigger or its lifetime deadline. Spawned projectiles must not begin overlapping other colliders if you want them to fly before returning.
 
 ## Tests
 
-In Unity, open **Window > General > Test Runner**, select **PlayMode**, and run `AdvancedPooling.Tests.PlayMode`. Tests cover lifecycle ordering, active/inactive source prefabs, prewarming, ownership, duplicate returns, active and retention limits, scoped rentals, clearing, disposal, callback failures, external destruction, 3D collisions and triggers, projectile expiry, spawner/container teardown, and warmed managed allocations.
+In Unity, open **Window > General > Test Runner**, select **PlayMode**, and run `AdvancedPooling.Tests.PlayMode`. Tests cover lifecycle ordering, active/inactive source prefabs, prewarming, ownership, duplicate returns, active and retention limits, scoped rentals, clearing, disposal, callback failures, external destruction, 3D collisions and triggers, projectile expiry, spawner/container teardown, fixed-pool exhaustion, and managed allocations during single rentals, full bursts, scoped rentals, and rejected returns.
 
 For a command-line run, replace the editor and project paths for your machine:
 

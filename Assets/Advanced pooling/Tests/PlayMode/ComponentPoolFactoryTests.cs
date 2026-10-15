@@ -278,6 +278,7 @@ namespace AdvancedPooling.Tests
             Assert.Throws<ObjectDisposedException>(() => pool.Clear());
             Assert.Throws<ObjectDisposedException>(() => pool.Prewarm(0));
             Assert.Throws<ObjectDisposedException>(() => pool.TryGet(out _));
+            Assert.Throws<ObjectDisposedException>(() => pool.TryRelease(item));
             yield return null;
             Assert.That(item == null, Is.True);
         }
@@ -325,6 +326,205 @@ namespace AdvancedPooling.Tests
             for (int i = 0; i < 256; i++) pool.Release(pool.Get(Vector3.one, Quaternion.identity));
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
             Assert.That(allocated, Is.Zero, "The warmed factory hot path must not allocate.");
+        }
+
+        private ComponentPoolFactory<PoolTestItem> CreateFixedPool(int capacity)
+        {
+            var pool = ComponentPoolFactory<PoolTestItem>.CreateFixed(_prefab, capacity);
+            _pools.Add(pool);
+            return pool;
+        }
+
+        [Test]
+        public void FixedPoolIsFullyPrewarmedAndDoesNotGrow()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => CreateFixedPool(0));
+            Assert.Throws<ArgumentOutOfRangeException>(() => CreateFixedPool(-1));
+            var pool = CreateFixedPool(2);
+            Assert.That(pool.AllowGrowth, Is.False);
+            Assert.That(pool.CountInactive, Is.EqualTo(2));
+            var first = pool.Get();
+            pool.Get();
+            Assert.That(pool.TryGet(out var missing), Is.False);
+            Assert.That(missing, Is.Null);
+            Assert.That(pool.CountAll, Is.EqualTo(2));
+            pool.Release(first);
+            Assert.That(pool.TryGet(out var reused), Is.True);
+            Assert.That(reused, Is.SameAs(first));
+        }
+
+        [Test]
+        public void NonGrowingPoolRequiresExplicitPrewarmAfterClear()
+        {
+            var pool = new ComponentPoolFactory<PoolTestItem>(_prefab, allowGrowth: false);
+            _pools.Add(pool);
+            Assert.That(pool.TryGet(out _), Is.False);
+            Assert.Throws<InvalidOperationException>(() => pool.Get());
+            pool.Prewarm(2);
+            Assert.That(pool.TryGet(out var item), Is.True);
+            pool.Release(item);
+            pool.Clear();
+            Assert.That(pool.TryGet(Vector3.one, Quaternion.identity, out _), Is.False);
+            Assert.That(pool.CountAll, Is.Zero);
+            pool.Prewarm(2);
+            Assert.That(pool.TryGet(out _), Is.True);
+        }
+
+        [UnityTest]
+        public IEnumerator FixedPoolDoesNotReplaceDestroyedInactiveInstances()
+        {
+            var pool = CreateFixedPool(1);
+            var item = pool.Get();
+            pool.Release(item);
+            Object.Destroy(item.gameObject);
+            yield return null;
+            Assert.That(pool.TryGet(out var missing), Is.False);
+            Assert.That(missing, Is.Null);
+            Assert.That(pool.CountAll, Is.Zero);
+            // Explicit setup is allowed to repair the fixed pool; retrieval never does so.
+            pool.Prewarm(1);
+            Assert.That(pool.TryGet(out _), Is.True);
+        }
+
+        [Test]
+        public void FixedPoolDoesNotReplaceInstancesDiscardedAfterCallbackFailure()
+        {
+            var pool = CreateFixedPool(1);
+            PoolTestItem.FailSpawn = true;
+            Assert.Throws<InvalidOperationException>(() => pool.Get());
+            PoolTestItem.FailSpawn = false;
+            Assert.That(pool.TryGet(out _), Is.False);
+            Assert.That(pool.CountAll, Is.Zero);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void PrewarmReservesTrackingForTheFirstFullBurst(bool setPose)
+        {
+            const int capacity = 64;
+            // Warm shared code paths on a different pool, not the objects being measured.
+            var warmup = CreatePool();
+            warmup.Release(warmup.Get(Vector3.one, Quaternion.identity));
+            warmup.Release(warmup.Get());
+            var pool = CreatePool(capacity: 0, maxSize: capacity);
+            pool.Prewarm(capacity);
+            var items = new PoolTestItem[capacity];
+            int acquired = 0;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < capacity; i++)
+            {
+                bool success = setPose
+                    ? pool.TryGet(Vector3.one, Quaternion.identity, out items[i])
+                    : pool.TryGet(out items[i]);
+                if (success) acquired++;
+            }
+            for (int i = capacity - 1; i >= 0; i--) pool.Release(items[i]);
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(acquired, Is.EqualTo(capacity));
+            Assert.That(allocated, Is.Zero, "Even the first concurrent burst must use reserved tracking capacity.");
+        }
+
+        [Test]
+        public void PrewarmingWithOutstandingRentalsReservesCombinedCapacity()
+        {
+            const int capacity = 64;
+            var pool = CreatePool(capacity: 0, maxSize: capacity + 1);
+            var outstanding = pool.Get();
+            pool.Prewarm(capacity);
+            var items = new PoolTestItem[capacity];
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < capacity; i++) items[i] = pool.Get();
+            pool.Release(outstanding);
+            for (int i = 0; i < capacity; i++) pool.Release(items[i]);
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(pool.CountInactive, Is.EqualTo(capacity + 1));
+            Assert.That(allocated, Is.Zero, "Returning the outstanding rental must not grow inactive storage.");
+        }
+
+        [Test]
+        public void FixedPoolBurstAndExhaustionDoNotAllocateManagedMemory()
+        {
+            const int capacity = 64;
+            var pool = CreateFixedPool(capacity);
+            var items = new PoolTestItem[capacity];
+            int acquired = 0;
+            int unexpected = 0;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int burst = 0; burst < 16; burst++)
+            {
+                for (int i = 0; i < capacity; i++)
+                    if (pool.TryGet(Vector3.one, Quaternion.identity, out items[i])) acquired++;
+                for (int i = 0; i < 16; i++)
+                {
+                    if (pool.TryGet(out _)) unexpected++;
+                    if (pool.TryGet(Vector3.zero, Quaternion.identity, out _)) unexpected++;
+                }
+                for (int i = capacity - 1; i >= 0; i--)
+                {
+                    if ((i & 1) == 0) pool.Release(items[i]);
+                    else if (!pool.TryRelease(items[i])) unexpected++;
+                }
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(acquired, Is.EqualTo(capacity * 16));
+            Assert.That(unexpected, Is.Zero);
+            Assert.That(pool.CountAll, Is.EqualTo(capacity));
+            Assert.That(allocated, Is.Zero, "Successful rentals, burst returns, and expected saturation must not allocate.");
+        }
+
+        [Test]
+        public void EmptyNonGrowingPoolRejectsRentalsWithoutAllocating()
+        {
+            var pool = new ComponentPoolFactory<PoolTestItem>(_prefab,
+                defaultCapacity: 0, maxSize: 1, allowGrowth: false);
+            _pools.Add(pool);
+            // This checks storage exhaustion independently of the active limit.
+            int unexpected = 0;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 512; i++)
+            {
+                if (pool.TryGet(out _)) unexpected++;
+                if (pool.TryGet(Vector3.zero, Quaternion.identity, out _)) unexpected++;
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(unexpected, Is.Zero);
+            Assert.That(pool.CountAll, Is.Zero);
+            Assert.That(allocated, Is.Zero);
+        }
+
+        [Test]
+        public void TryReleaseRejectsInvalidReturnsWithoutAllocating()
+        {
+            var pool = CreateFixedPool(1);
+            var item = pool.Get();
+            Assert.That(pool.TryRelease(item), Is.True);
+            Assert.That(pool.TryRelease(null), Is.False);
+            Assert.That(pool.TryRelease(_prefab), Is.False);
+            int unexpected = 0;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 256; i++)
+            {
+                if (pool.TryRelease(item)) unexpected++;
+                if (pool.TryRelease(null)) unexpected++;
+                if (pool.TryRelease(_prefab)) unexpected++;
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(unexpected, Is.Zero);
+            Assert.That(pool.CountInactive, Is.EqualTo(1));
+            Assert.That(allocated, Is.Zero);
+        }
+
+        [Test]
+        public void ScopedFixedPoolRentalsDoNotAllocateManagedMemory()
+        {
+            var pool = CreateFixedPool(1);
+            using (pool.Get(out _)) { }
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 256; i++)
+                using (pool.Get(out _)) { }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(allocated, Is.Zero);
+            Assert.That(pool.CountInactive, Is.EqualTo(1));
         }
 
         [UnityTest]
@@ -378,7 +578,6 @@ namespace AdvancedPooling.Tests
             var flags = BindingFlags.Instance | BindingFlags.NonPublic;
             typeof(PoolDemoSpawner).GetField("_prefabToSpawn", flags).SetValue(spawner, projectile);
             typeof(PoolDemoSpawner).GetField("_maxCapacity", flags).SetValue(spawner, 2);
-            typeof(PoolDemoSpawner).GetField("_prewarmCount", flags).SetValue(spawner, 2);
             if (callerOwnedContainer)
             {
                 var parent = new GameObject("Caller Container");
